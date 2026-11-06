@@ -16,6 +16,7 @@ pub const FILE_TYPE_PIPE: DWORD = 3;
 pub const ENABLE_VIRTUAL_TERMINAL_PROCESSING: DWORD = 0x0004;
 pub const ENABLE_PROCESSED_OUTPUT: DWORD = 0x0001;
 pub const PROCESS_TERMINATE: DWORD = 0x0001;
+pub const PROCESS_SUSPEND_RESUME: DWORD = 0x0800;
 pub const SYNCHRONIZE: DWORD = 0x0010_0000;
 pub const WAIT_OBJECT_0: DWORD = 0;
 pub const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
@@ -213,6 +214,12 @@ pub fn seek_std_append(n: DWORD) {
     }
 }
 
+#[link(name = "ntdll")]
+extern "system" {
+    fn NtSuspendProcess(h: HANDLE) -> i32;
+    fn NtResumeProcess(h: HANDLE) -> i32;
+}
+
 #[link(name = "advapi32")]
 extern "system" {
     pub fn GetUserNameW(buf: *mut u16, len: *mut DWORD) -> BOOL;
@@ -315,6 +322,30 @@ pub fn kill_pid(pid: u32, code: u32) -> bool {
             return false;
         }
         let ok = TerminateProcess(h, code) != 0;
+        CloseHandle(h);
+        ok
+    }
+}
+
+pub fn suspend_pid(pid: u32) -> bool {
+    unsafe {
+        let h = OpenProcess(PROCESS_SUSPEND_RESUME, 0, pid);
+        if h.is_null() {
+            return false;
+        }
+        let ok = NtSuspendProcess(h) == 0;
+        CloseHandle(h);
+        ok
+    }
+}
+
+pub fn resume_pid(pid: u32) -> bool {
+    unsafe {
+        let h = OpenProcess(PROCESS_SUSPEND_RESUME, 0, pid);
+        if h.is_null() {
+            return false;
+        }
+        let ok = NtResumeProcess(h) == 0;
         CloseHandle(h);
         ok
     }
