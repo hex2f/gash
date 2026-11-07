@@ -2,6 +2,8 @@
 
 # gash
 
+> **On macOS?** See [gash-mac](https://github.com/chinmayajha/gash-mac), a port of gash to macOS.
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/speed-dark.svg">
   <img src="assets/speed-light.svg" width="100%" alt="gash vs Git Bash in real time: each ball crosses its track once per run. gash's balls fly back and forth while Git Bash's barely move.">
