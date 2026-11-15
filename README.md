@@ -208,6 +208,19 @@ GASH_COMPAT_JOBS=8 cargo test --test compat       # parallel
 
 `tests/regen_expected.ps1` regenerates the expected outputs from Git Bash.
 
+The parity suite in [`tests/parity`](tests/parity) runs its cases and the compat scripts under
+Git Bash and under gash, and compares stdout, stderr, exit code and the files each run leaves
+behind. `cargo test` skips it, because it needs its own copy of Git for Windows and takes about a
+minute. [`tests/parity/setup-ref.ps1`](tests/parity/setup-ref.ps1) makes that copy under
+`%LOCALAPPDATA%\gash-parity`:
+
+```bash
+powershell -ExecutionPolicy Bypass -File tests/parity/setup-ref.ps1   # once
+cargo test --test parity -- --ignored
+```
+
+A line in [`tests/parity/accepted.txt`](tests/parity/accepted.txt) accepts a difference.
+
 ## Contributing
 
 **Every commit must be attributed to the model that produced it, if any.** End the commit
