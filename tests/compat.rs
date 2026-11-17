@@ -18,25 +18,20 @@
 //! `LC_ALL=C`, and `LANG`, `LC_*`, `BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`,
 //! `CDPATH`, `GLOBIGNORE`, `POSIXLY_CORRECT` are removed.
 
+mod support;
+
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use support::{run_command, stderr_excerpt, stdout_diff, RunOutput};
+
 const TIMEOUT: Duration = Duration::from_secs(20);
-/// How long to keep waiting for stdout/stderr EOF after the process exited
-/// (a leaked background process may keep the pipes open).
-const PIPE_GRACE: Duration = Duration::from_secs(3);
-const MAX_DIFF_LINES: usize = 15;
-const MAX_STDERR_LINES: usize = 10;
-const MAX_LINE_CHARS: usize = 200;
-/// Above this many lines on either side, fall back to a positional diff.
-const MAX_LCS_LINES: usize = 3000;
 
 const REMOVED_ENV: &[&str] = &[
     "LANG",
@@ -48,16 +43,6 @@ const REMOVED_ENV: &[&str] = &[
     "GLOBIGNORE",
     "POSIXLY_CORRECT",
 ];
-
-struct RunOutput {
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-    code: Option<i32>,
-    timed_out: bool,
-    pipes_left_open: bool,
-    spawn_error: Option<String>,
-    elapsed: Duration,
-}
 
 struct Outcome {
     name: String,
@@ -219,13 +204,8 @@ fn check_script(exe: &Path, dir: &Path, name: &str) -> Outcome {
 }
 
 fn run_script(exe: &Path, dir: &Path, name: &str) -> RunOutput {
-    let start = Instant::now();
     let mut cmd = Command::new(exe);
-    cmd.arg(name)
-        .current_dir(dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.arg(name).current_dir(dir).stdin(Stdio::null());
     for (key, _) in std::env::vars_os() {
         if let Some(k) = key.to_str() {
             let upper = k.to_ascii_uppercase();
@@ -235,307 +215,5 @@ fn run_script(exe: &Path, dir: &Path, name: &str) -> RunOutput {
         }
     }
     cmd.env("LC_ALL", "C");
-
-    let mut child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(e) => {
-            return RunOutput {
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-                code: None,
-                timed_out: false,
-                pipes_left_open: false,
-                spawn_error: Some(e.to_string()),
-                elapsed: start.elapsed(),
-            };
-        }
-    };
-
-    let job = ProcessJob::attach(&child);
-    let stdout = PipeReader::start(child.stdout.take().expect("stdout is piped"));
-    let stderr = PipeReader::start(child.stderr.take().expect("stderr is piped"));
-
-    let mut timed_out = false;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) => {}
-            Err(_) => break None,
-        }
-        if start.elapsed() >= TIMEOUT {
-            timed_out = true;
-            kill_tree(&mut child, &job);
-            break child.wait().ok();
-        }
-        thread::sleep(Duration::from_millis(5));
-    };
-
-    let deadline = Instant::now() + PIPE_GRACE;
-    let (stdout, out_open) = stdout.finish(deadline);
-    let (stderr, err_open) = stderr.finish(deadline);
-    RunOutput {
-        stdout,
-        stderr,
-        code: status.and_then(|s| s.code()),
-        timed_out,
-        pipes_left_open: out_open || err_open,
-        spawn_error: None,
-        elapsed: start.elapsed(),
-    }
-}
-
-/// Kills the child and everything it spawned. On Windows killing a process
-/// does not kill its children, and an orphaned grandchild (an external
-/// command, a forked subshell) would otherwise linger and keep our pipes open.
-/// The child is placed in a Job Object right after spawning (descendants
-/// inherit it even when their Windows parent has already exited, which is
-/// common with MSYS fork/exec); `taskkill /T` is a fallback.
-fn kill_tree(child: &mut std::process::Child, job: &ProcessJob) {
-    job.terminate();
-    if cfg!(windows) {
-        let _ = Command::new("taskkill")
-            .args(["/T", "/F", "/PID", &child.id().to_string()])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
-    let _ = child.kill();
-}
-
-#[cfg(windows)]
-mod job {
-    use std::ffi::c_void;
-    use std::os::windows::io::AsRawHandle;
-
-    type Handle = *mut c_void;
-
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn CreateJobObjectW(attributes: *mut c_void, name: *const u16) -> Handle;
-        fn AssignProcessToJobObject(job: Handle, process: Handle) -> i32;
-        fn TerminateJobObject(job: Handle, exit_code: u32) -> i32;
-        fn CloseHandle(handle: Handle) -> i32;
-    }
-
-    pub struct ProcessJob(Handle);
-
-    impl ProcessJob {
-        pub fn attach(child: &std::process::Child) -> ProcessJob {
-            // SAFETY: plain Win32 calls; a null handle is tolerated everywhere below.
-            unsafe {
-                let job = CreateJobObjectW(std::ptr::null_mut(), std::ptr::null());
-                if !job.is_null() && AssignProcessToJobObject(job, child.as_raw_handle()) == 0 {
-                    CloseHandle(job);
-                    return ProcessJob(std::ptr::null_mut());
-                }
-                ProcessJob(job)
-            }
-        }
-
-        pub fn terminate(&self) {
-            if !self.0.is_null() {
-                // SAFETY: self.0 is a live job handle owned by this struct.
-                unsafe {
-                    TerminateJobObject(self.0, 1);
-                }
-            }
-        }
-    }
-
-    impl Drop for ProcessJob {
-        fn drop(&mut self) {
-            if !self.0.is_null() {
-                // SAFETY: closing the handle we created exactly once.
-                unsafe {
-                    CloseHandle(self.0);
-                }
-            }
-        }
-    }
-}
-
-#[cfg(not(windows))]
-mod job {
-    pub struct ProcessJob;
-    impl ProcessJob {
-        pub fn attach(_child: &std::process::Child) -> ProcessJob {
-            ProcessJob
-        }
-        pub fn terminate(&self) {}
-    }
-}
-
-use job::ProcessJob;
-
-/// Drains a pipe on a background thread so the child never blocks on a full
-/// pipe while we poll `try_wait`; partial data is still available if the pipe
-/// never reaches EOF.
-struct PipeReader {
-    data: Arc<Mutex<Vec<u8>>>,
-    done: mpsc::Receiver<()>,
-}
-
-impl PipeReader {
-    fn start<R: Read + Send + 'static>(mut pipe: R) -> PipeReader {
-        let data = Arc::new(Mutex::new(Vec::new()));
-        let (tx, done) = mpsc::channel();
-        let sink = Arc::clone(&data);
-        thread::spawn(move || {
-            let mut buf = [0u8; 8192];
-            loop {
-                match pipe.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => sink.lock().unwrap().extend_from_slice(&buf[..n]),
-                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(_) => break,
-                }
-            }
-            let _ = tx.send(());
-        });
-        PipeReader { data, done }
-    }
-
-    /// Returns the collected bytes and whether the pipe was still open at the deadline.
-    fn finish(self, deadline: Instant) -> (Vec<u8>, bool) {
-        let wait = deadline.saturating_duration_since(Instant::now());
-        let still_open = self.done.recv_timeout(wait).is_err();
-        let bytes = std::mem::take(&mut *self.data.lock().unwrap());
-        (bytes, still_open)
-    }
-}
-
-/// Splits into lines that keep their trailing `\n` (the last one may lack it).
-fn split_lines(bytes: &[u8]) -> Vec<&[u8]> {
-    bytes.split_inclusive(|&b| b == b'\n').collect()
-}
-
-#[derive(Clone, Copy)]
-enum Edit {
-    Equal,
-    Delete(usize), // line index in expected
-    Insert(usize), // line index in actual
-}
-
-fn diff_lines(a: &[&[u8]], b: &[&[u8]]) -> Vec<Edit> {
-    if a.len() > MAX_LCS_LINES || b.len() > MAX_LCS_LINES {
-        // Positional comparison for huge outputs.
-        let mut edits = Vec::new();
-        for i in 0..a.len().max(b.len()) {
-            match (a.get(i), b.get(i)) {
-                (Some(x), Some(y)) if x == y => edits.push(Edit::Equal),
-                (x, y) => {
-                    if x.is_some() {
-                        edits.push(Edit::Delete(i));
-                    }
-                    if y.is_some() {
-                        edits.push(Edit::Insert(i));
-                    }
-                }
-            }
-        }
-        return edits;
-    }
-    // lcs[i][j] = length of the LCS of a[i..] and b[j..]
-    let (n, m) = (a.len(), b.len());
-    let width = m + 1;
-    let mut lcs = vec![0u16; (n + 1) * (m + 1)];
-    for i in (0..n).rev() {
-        for j in (0..m).rev() {
-            lcs[i * width + j] = if a[i] == b[j] {
-                lcs[(i + 1) * width + j + 1] + 1
-            } else {
-                lcs[(i + 1) * width + j].max(lcs[i * width + j + 1])
-            };
-        }
-    }
-    let (mut i, mut j) = (0, 0);
-    let mut edits = Vec::new();
-    while i < n || j < m {
-        if i < n && j < m && a[i] == b[j] {
-            edits.push(Edit::Equal);
-            i += 1;
-            j += 1;
-        } else if j >= m || (i < n && lcs[(i + 1) * width + j] >= lcs[i * width + j + 1]) {
-            edits.push(Edit::Delete(i));
-            i += 1;
-        } else {
-            edits.push(Edit::Insert(j));
-            j += 1;
-        }
-    }
-    edits
-}
-
-fn stdout_diff(expected: &[u8], actual: &[u8]) -> String {
-    let a = split_lines(expected);
-    let b = split_lines(actual);
-    let edits = diff_lines(&a, &b);
-    let changed: Vec<String> = edits
-        .iter()
-        .filter_map(|e| match *e {
-            Edit::Equal => None,
-            Edit::Delete(i) => Some(format!("    - {:>4} | {}", i + 1, show_line(a[i]))),
-            Edit::Insert(j) => Some(format!("    + {:>4} | {}", j + 1, show_line(b[j]))),
-        })
-        .collect();
-    let mut s = format!(
-        "  stdout differs ({} expected lines, {} actual; {} changed; - expected, + actual):\n",
-        a.len(),
-        b.len(),
-        changed.len()
-    );
-    for line in changed.iter().take(MAX_DIFF_LINES) {
-        s.push_str(line);
-        s.push('\n');
-    }
-    if changed.len() > MAX_DIFF_LINES {
-        s.push_str(&format!("    ... {} more changed lines\n", changed.len() - MAX_DIFF_LINES));
-    }
-    s
-}
-
-fn stderr_excerpt(stderr: &[u8]) -> String {
-    if stderr.is_empty() {
-        return "  stderr: (empty)\n".to_string();
-    }
-    let lines = split_lines(stderr);
-    let mut s = format!(
-        "  stderr (first {} of {} lines):\n",
-        lines.len().min(MAX_STDERR_LINES),
-        lines.len()
-    );
-    for line in lines.iter().take(MAX_STDERR_LINES) {
-        s.push_str("    | ");
-        s.push_str(&show_line(line));
-        s.push('\n');
-    }
-    s
-}
-
-/// Renders one output line for the report: control characters escaped,
-/// missing final newline marked, very long lines truncated.
-fn show_line(line: &[u8]) -> String {
-    let (body, has_newline) = match line.strip_suffix(b"\n") {
-        Some(body) => (body, true),
-        None => (line, false),
-    };
-    let text = String::from_utf8_lossy(body);
-    let mut out = String::new();
-    for (count, c) in text.chars().enumerate() {
-        if count >= MAX_LINE_CHARS {
-            out.push_str("...");
-            break;
-        }
-        match c {
-            '\t' => out.push_str("\\t"),
-            '\r' => out.push_str("\\r"),
-            c if c.is_control() => out.push_str(&format!("\\x{:02x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    if !has_newline {
-        out.push_str("  [no newline at end]");
-    }
-    out
+    run_command(cmd, TIMEOUT, false)
 }
