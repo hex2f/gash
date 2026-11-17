@@ -1,0 +1,45 @@
+-- relative entry
+0=./node_modules/.bin/probe
+dirname=./node_modules/.bin
+source=./node_modules/.bin/probe
+-- relative entry, no ./
+0=node_modules/.bin/probe
+dirname=node_modules/.bin
+source=node_modules/.bin/probe
+-- relative entry, trailing slash
+0=./node_modules/.bin/probe
+dirname=./node_modules/.bin
+source=./node_modules/.bin/probe
+-- absolute entry
+0=<t>/sub/node_modules/.bin/probe
+dirname=<t>/sub/node_modules/.bin
+source=<t>/sub/node_modules/.bin/probe
+-- empty entry (current directory)
+0=./probe
+dirname=.
+source=./probe
+-- PATH given as a prefix assignment
+0=./node_modules/.bin/probe
+dirname=./node_modules/.bin
+source=./node_modules/.bin/probe
+-- in a pipeline and in the background
+0=./node_modules/.bin/probe
+dirname=./node_modules/.bin
+source=./node_modules/.bin/probe
+0=./node_modules/.bin/probe
+dirname=./node_modules/.bin
+source=./node_modules/.bin/probe
+-- npm shim, run from elsewhere
+pkg ran: a b
+pkg ran: c d
+-- typed with a slash: as typed
+0=./node_modules/.bin/probe
+dirname=./node_modules/.bin
+source=./node_modules/.bin/probe
+0=node_modules/.bin/probe
+dirname=node_modules/.bin
+source=node_modules/.bin/probe
+-- run as bash script: as given
+0=given.sh
+dirname=.
+source=given.sh

@@ -1373,7 +1373,10 @@ impl Shell {
         }
         let r = self.find_in_path(name, &p);
         if let Some(r) = &r {
-            if self.o[O_HASHALL] {
+            // A hit in a relative PATH entry (`./node_modules/.bin`) depends on the current
+            // directory, so it isn't remembered.
+            let relative = r.found_as.as_deref().is_some_and(|f| !f.starts_with(['/', '\\']) && !path::is_windows_abs(f));
+            if self.o[O_HASHALL] && !relative {
                 self.hash.insert(name.to_string(), r.clone());
             }
         }
@@ -1388,7 +1391,12 @@ impl Shell {
         for d in dirs {
             let d = if d.is_empty() { ".".to_string() } else { d };
             let wd = path::to_win(&d, &self.cwd);
-            if let Some(r) = self.probe(&wd, name, true) {
+            if let Some(mut r) = self.probe(&wd, name, true) {
+                // The name of the file actually found (`probe`, or `probe.cmd` for `probe`).
+                if let Some(f) = r.path.file_name() {
+                    let sep = if d.ends_with(['/', '\\']) { "" } else { "/" };
+                    r.found_as = Some(format!("{}{}{}", d, sep, f.to_string_lossy()));
+                }
                 return Some(prefer_native_coreutils(r));
             }
         }
@@ -1448,12 +1456,12 @@ impl Shell {
         match ext.as_str() {
             "exe" | "com" => {
                 if let Some(util) = crate::coreutils::get().and_then(|cu| cu.util_of(p)) {
-                    return Some(Resolved { path: p.to_path_buf(), kind: ExeKind::Coreutils, interp: None, util: Some(util), opts: Vec::new() });
+                    return Some(Resolved { path: p.to_path_buf(), kind: ExeKind::Coreutils, interp: None, util: Some(util), opts: Vec::new(), found_as: None });
                 }
                 let kind = if path::is_msys_binary(p) || is_msys_dir(p) { ExeKind::Msys } else { ExeKind::Native };
-                return Some(Resolved { path: p.to_path_buf(), kind, interp: None, util: None, opts: Vec::new() });
+                return Some(Resolved { path: p.to_path_buf(), kind, interp: None, util: None, opts: Vec::new(), found_as: None });
             }
-            "bat" | "cmd" => return Some(Resolved { path: p.to_path_buf(), kind: ExeKind::Batch, interp: None, util: None, opts: Vec::new() }),
+            "bat" | "cmd" => return Some(Resolved { path: p.to_path_buf(), kind: ExeKind::Batch, interp: None, util: None, opts: Vec::new(), found_as: None }),
             _ => {}
         }
         let mut f = std::fs::File::open(p).ok()?;
@@ -1462,7 +1470,7 @@ impl Shell {
         let head = &buf[..n];
         if head.starts_with(b"MZ") {
             let kind = if is_msys_dir(p) { ExeKind::Msys } else { ExeKind::Native };
-            return Some(Resolved { path: p.to_path_buf(), kind, interp: None, util: None, opts: Vec::new() });
+            return Some(Resolved { path: p.to_path_buf(), kind, interp: None, util: None, opts: Vec::new(), found_as: None });
         }
         if head.starts_with(b"#!") {
             let line_end = head.iter().position(|&b| b == b'\n').unwrap_or(head.len());
@@ -1486,7 +1494,7 @@ impl Shell {
             };
             let pbase = prog.rsplit(['/', '\\']).next().unwrap_or("").trim_end_matches(".exe").to_string();
             if matches!(pbase.as_str(), "sh" | "bash" | "dash" | "ash" | "gash") && arg.as_deref().map(|a| !a.contains("-c")).unwrap_or(true) {
-                return Some(Resolved { path: p.to_path_buf(), kind: ExeKind::Script, interp: None, util: None, opts });
+                return Some(Resolved { path: p.to_path_buf(), kind: ExeKind::Script, interp: None, util: None, opts, found_as: None });
             }
             // locate interpreter
             let ip = if prog.contains('/') || prog.contains('\\') {
@@ -1516,12 +1524,12 @@ impl Shell {
             };
             let ip = ip?;
             let ik = if path::is_msys_binary(&ip) || is_msys_dir(&ip) { ExeKind::Msys } else { ExeKind::Native };
-            return Some(Resolved { path: p.to_path_buf(), kind: ExeKind::Interp, interp: Some((ip, ik, arg)), util: None, opts: Vec::new() });
+            return Some(Resolved { path: p.to_path_buf(), kind: ExeKind::Interp, interp: Some((ip, ik, arg)), util: None, opts: Vec::new(), found_as: None });
         }
         if strict && ext != "sh" {
             return None;
         }
-        Some(Resolved { path: p.to_path_buf(), kind: ExeKind::Script, interp: None, util: None, opts: Vec::new() })
+        Some(Resolved { path: p.to_path_buf(), kind: ExeKind::Script, interp: None, util: None, opts: Vec::new(), found_as: None })
     }
 
     // ---------- external commands ----------
@@ -1614,7 +1622,14 @@ impl Shell {
                 for o in &res.opts {
                     cmd.arg(o);
                 }
-                cmd.arg(res.path.as_os_str());
+                // The new shell runs in our directory, so the script's `$0` can be given as is
+                // (a name starting with `-` would be taken for an option).
+                let arg0 = script_arg0(res, argv);
+                if arg0.starts_with('-') {
+                    cmd.arg(res.path.as_os_str());
+                } else {
+                    cmd.arg(arg0);
+                }
                 for a in &argv[1..] {
                     cmd.arg(a);
                 }
@@ -1783,12 +1798,13 @@ impl Shell {
             }
         };
         let mut child = self.child_shell(assigns);
-        if !res.opts.is_empty() && !apply_shebang_opts(&mut child, &res.opts, &argv[0]) {
+        let arg0 = script_arg0(res, argv);
+        if !res.opts.is_empty() && !apply_shebang_opts(&mut child, &res.opts, &arg0) {
             return None;
         }
-        child.arg0 = argv[0].clone();
+        child.arg0 = arg0.clone();
         child.positional = argv[1..].to_vec();
-        child.source_name = argv[0].clone();
+        child.source_name = arg0;
         let st = child.run_main(&src);
         Some(Ok(st))
     }
@@ -2060,6 +2076,12 @@ fn names_std_fd(args: &[String], fd: i32) -> bool {
     })
 }
 
+/// `$0` for a shell script about to run: where a PATH search found it, or else the name as
+/// typed (which then has a slash in it). Scripts find their own folder with `dirname "$0"`.
+fn script_arg0(res: &Resolved, argv: &[String]) -> String {
+    res.found_as.clone().unwrap_or_else(|| argv[0].clone())
+}
+
 /// Applies the options on a script's `#!` line (`#!/bin/bash -e`, `#!/usr/bin/env -S bash -eu`)
 /// to the shell that runs it, with bash's command-line syntax. Returns false for anything that
 /// would make bash print something or refuse to start (an invalid option, `--version`, ...);
@@ -2091,7 +2113,7 @@ fn prefer_native_coreutils(r: Resolved) -> Resolved {
     };
     match crate::coreutils::static_name(&stem) {
         Some(util) if path::is_msys_binary(&r.path) => {
-            Resolved { path: cu.program(util), kind: ExeKind::Coreutils, interp: None, util: Some(util), opts: Vec::new() }
+            Resolved { path: cu.program(util), kind: ExeKind::Coreutils, interp: None, util: Some(util), opts: Vec::new(), found_as: None }
         }
         _ => r,
     }

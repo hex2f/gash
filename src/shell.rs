@@ -289,6 +289,10 @@ pub struct Resolved {
     pub util: Option<&'static str>,
     /// For ExeKind::Script: the options on its `#!` line, as bash would be given them.
     pub opts: Vec<String>,
+    /// When found by a PATH search: the PATH entry joined with the name of the file found
+    /// (`./node_modules/.bin/probe`). A script run this way gets it as `$0`, as a shell that
+    /// execve()s the path it found does.
+    pub found_as: Option<String>,
 }
 
 static FAKE_PID: AtomicU32 = AtomicU32::new(0);
