@@ -1,0 +1,2 @@
+# Cases, fixtures and helper scripts are byte-exact (bash on MSYS chokes on CRLF).
+* -text

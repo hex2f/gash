@@ -1,0 +1,18 @@
+# Known divergences of gash from the reference shell.
+#
+# One entry per line: <case-glob> <observable> <reason text>
+#   case-glob   case id pattern with * and ?, e.g. compat/05* or host/*
+#   observable  stdout, stderr, code, tree, cwd, survivors or all,
+#               or stdout:<line-glob> / stderr:<line-glob> for single lines,
+#               quoted as stdout:"<line-glob>" when the glob has spaces
+#   reason      free text, required
+#
+# A line glob matches a whole normalised line (* and ?, case-sensitive,
+# no line ending). Matching lines are dropped from the reference and the
+# gash output before they are compared again.
+#
+# A covered divergence reports as ACCEPTED. An entry that covers nothing,
+# or a line entry that matched no line, fails the run when its case glob
+# matches a case of the run, unless such a case was dropped.
+#
+# GASH_PARITY_ACCEPTED=<path;path> loads these files instead of this one.
