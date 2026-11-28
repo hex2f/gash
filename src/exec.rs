@@ -169,6 +169,11 @@ pub fn read_script_file(p: &Path) -> std::io::Result<String> {
     Ok(s)
 }
 
+/// Compound commands whose status `set -e` and the ERR trap already judged inside the body.
+fn judged_in_body(kind: &CompoundKind) -> bool {
+    !matches!(kind, CompoundKind::Subshell(_) | CompoundKind::Cond(_) | CompoundKind::Arith(_))
+}
+
 impl Shell {
     // ---------- running source text ----------
 
@@ -417,7 +422,9 @@ impl Shell {
             let (u1, s1) = crate::sys::total_times();
             self.print_times(real, u1 - u0, s1 - s0, p.time_posix);
         }
-        if st != 0 && !p.negate && self.cond_depth == 0 && !self.in_trap {
+        let redir_failed = std::mem::take(&mut self.compound_redir_failed);
+        let body_judged = !redir_failed && matches!(&p.cmds[..], [(Command::Compound { kind, .. }, _)] if judged_in_body(kind));
+        if st != 0 && !p.negate && !body_judged && self.cond_depth == 0 && !self.in_trap {
             if self.func_depth == 0 || self.o[O_ERRTRACE] {
                 self.run_trap("ERR")?;
             }
@@ -700,7 +707,10 @@ impl Shell {
         }
         let saved = match self.apply_redirs(redirs) {
             Ok(s) => s,
-            Err(RedirErr::Failed) => return Ok(1),
+            Err(RedirErr::Failed) => {
+                self.compound_redir_failed = true;
+                return Ok(1);
+            }
             Err(RedirErr::Flow(f)) => return Err(f),
         };
         let r = self.exec_compound(kind);
@@ -1943,7 +1953,9 @@ impl Shell {
         // < <(cmd) and > >(cmd): stream through a pipe to a worker thread
         if let [WordPart::ProcSubst { input, prog }] = w.parts.as_slice() {
             let reading = matches!(r.op, RedirOp::In);
-            let writing = matches!(r.op, RedirOp::Out | RedirOp::Append | RedirOp::Clobber);
+            // &> >(cmd), &>> >(cmd), >& >(cmd) and 1>& >(cmd) send stdout and stderr into the pipe.
+            let both = matches!(r.op, RedirOp::OutErr | RedirOp::AppendOutErr) || (r.op == RedirOp::DupOut && r.fd.unwrap_or(1) == 1 && r.fd_var.is_none());
+            let writing = both || matches!(r.op, RedirOp::Out | RedirOp::Append | RedirOp::Clobber);
             if (reading && *input) || (writing && !*input) {
                 let (pr, pw) = match std::io::pipe() {
                     Ok(p) => p,
@@ -1970,6 +1982,9 @@ impl Shell {
                     .expect("spawn process substitution");
                 if writing {
                     self.ps_threads.push(h);
+                }
+                if both {
+                    self.set_fd_saved(2, Some(mine.clone()), saved, persist);
                 }
                 self.set_fd_saved(fd, Some(mine), saved, persist);
                 return Ok(());
