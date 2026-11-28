@@ -367,6 +367,8 @@ pub struct Shell {
     /// One-shot, for the next `exec_command`: it is a command bash would fork on
     /// its own (a pipeline element, or a lone `cmd &`); `Some(true)` if it reads a pipe.
     pub forked: Option<bool>,
+    /// A compound command's own redirection failed. The next pipeline to finish reads and clears it.
+    pub compound_redir_failed: bool,
 }
 
 impl Shell {
@@ -440,6 +442,7 @@ impl Shell {
             ps_threads: Vec::new(),
             stdin_redir: false,
             forked: None,
+            compound_redir_failed: false,
         }
     }
 
@@ -509,6 +512,7 @@ impl Shell {
             ps_threads: Vec::new(),
             stdin_redir: self.stdin_redir,
             forked: None,
+            compound_redir_failed: false,
         }
     }
 

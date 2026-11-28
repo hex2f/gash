@@ -1,0 +1,45 @@
+-- exec > >(tee log) 2>&1
+rc=0
+out:
+hello
+err
+end
+log:
+hello
+err
+end
+-- exec &> >(tee log)
+rc=0
+out:
+hello
+err
+end
+log:
+hello
+err
+end
+-- exec >& >(tee log)
+rc=0
+out:
+hello
+err
+end
+log:
+hello
+err
+end
+-- exec &>> >(tee log)
+rc=0
+out:
+hello
+err
+end
+log:
+hello
+err
+end
+-- 1>& >(tee f)
+back
+rc=0
+y
+e

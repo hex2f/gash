@@ -1,0 +1,46 @@
+rc=0 [after] for i in 1 2; do [ a = b ] && :; done
+rc=0 [after] i=0; while [ $i -lt 2 ]; do i=$((i + 1)); [ a = b ] && :; done
+rc=0 [after] i=0; until [ $i -ge 2 ]; do i=$((i + 1)); [ a = b ] && :; done
+rc=0 [after] { [ a = b ] && :; }
+rc=1 [] ( [ a = b ] && : )
+rc=1 [] f() { [ a = b ] && :; }; f
+rc=0 [after] if true; then [ a = b ] && :; fi
+rc=0 [after] case a in a) [ a = b ] && : ;; esac
+rc=0 [after] for ((i = 0; i < 1; i++)); do [ a = b ] && :; done
+rc=0 [after] for i in 1; do for j in 1; do [ a = b ] && :; done; done
+rc=0 [in-f
+after] f() { { [ a = b ] && :; }; echo in-f; }; f
+rc=0 [after] trap 'echo ERR' ERR; { [ a = b ] && :; }
+rc=0 [after] for i in 1 2; do false || false && :; done
+rc=0 [after] i=0; while [ $i -lt 2 ]; do i=$((i + 1)); false || false && :; done
+rc=0 [after] i=0; until [ $i -ge 2 ]; do i=$((i + 1)); false || false && :; done
+rc=0 [after] { false || false && :; }
+rc=1 [] ( false || false && : )
+rc=1 [] f() { false || false && :; }; f
+rc=0 [after] if true; then false || false && :; fi
+rc=0 [after] case a in a) false || false && : ;; esac
+rc=0 [after] for ((i = 0; i < 1; i++)); do false || false && :; done
+rc=0 [after] for i in 1; do for j in 1; do false || false && :; done; done
+rc=0 [in-f
+after] f() { { false || false && :; }; echo in-f; }; f
+rc=0 [after] trap 'echo ERR' ERR; { false || false && :; }
+rc=0 [after] for i in 1; do ! true; done
+rc=0 [after] trap 'echo ERR' ERR; if true; then ! true; fi
+-- still exits
+rc=1 [] for i in 1; do false; done
+rc=1 [] true && false
+rc=1 [] { :; } > /nonexistent_dir_077/x
+rc=1 [] for i in 1; do :; done > /nonexistent_dir_077/x
+rc=1 [ERR] trap 'echo ERR' ERR; for i in 1; do false; done
+rc=1 [ERR 1] trap 'echo ERR $?' ERR; true; { :; } > /nonexistent_dir_077/x
+rc=1 [ERR 1] trap 'echo ERR $?' ERR; true; for i in 1; do :; done > /nonexistent_dir_077/x
+-- ERR fires once per failure without set -e
+[ERR ERR ERR after ]
+-- script with its output through tee
+rc=0
+out:
+probe
+end
+log:
+probe
+end
